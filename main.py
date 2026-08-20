@@ -2,7 +2,6 @@ import re
 import os
 import asyncio
 import logging
-from html import escape
 from typing import Optional, List, Dict, Any, Tuple
 from dotenv import load_dotenv
 
@@ -25,7 +24,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID")) if os.getenv("CHANNEL_ID") else None
-SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID") or os.getenv("ADMIN_ID"))
+SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID") or os.getenv("ADMIN_ID", 0))
 API_URL = os.getenv("API_URL", "https://my-bot-db-service.onrender.com").rstrip('/')
 
 if not BOT_TOKEN or not CHANNEL_ID or not SUPER_ADMIN_ID:
@@ -36,33 +35,43 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# Global HTTP Session (so'rovlar tezligi uchun)
+session: Optional[aiohttp.ClientSession] = None
+
+async def get_session() -> aiohttp.ClientSession:
+    global session
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+    return session
+
+
 # ==================== WEB SERVICE (API) MITOQLARI ====================
 
 class DatabaseAPI:
     @staticmethod
     async def _post(endpoint: str, json_data: dict) -> dict:
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(f"{API_URL}{endpoint}", json=json_data) as resp:
-                    if resp.status == 200:
-                        return await resp.json()
-                    logging.error(f"API Post Error [{resp.status}]: {await resp.text()}")
-                    return {}
-            except Exception as e:
-                logging.error(f"HTTP Connection error: {e}")
+        sess = await get_session()
+        try:
+            async with sess.post(f"{API_URL}{endpoint}", json=json_data) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                logging.error(f"API Post Error [{resp.status}]: {await resp.text()}")
                 return {}
+        except Exception as e:
+            logging.error(f"HTTP Connection error: {e}")
+            return {}
 
     @staticmethod
     async def _get(endpoint: str) -> dict:
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(f"{API_URL}{endpoint}") as resp:
-                    if resp.status == 200:
-                        return await resp.json()
-                    return {}
-            except Exception as e:
-                logging.error(f"HTTP Connection error: {e}")
+        sess = await get_session()
+        try:
+            async with sess.get(f"{API_URL}{endpoint}") as resp:
+                if resp.status == 200:
+                    return await resp.json()
                 return {}
+        except Exception as e:
+            logging.error(f"HTTP Connection error: {e}")
+            return {}
 
     async def add_user(self, user_id: int, full_name: str, username: Optional[str] = None):
         return await self._post("/users/add", {
@@ -126,7 +135,9 @@ class DatabaseAPI:
         res = await self._get(f"/movies/{code}")
         return res if res else None
 
+
 db = DatabaseAPI()
+
 
 # ==================== FSM HOLATLARI ====================
 
@@ -141,6 +152,7 @@ class AdminStates(StatesGroup):
     waiting_for_broadcast_btn_ask = State()
     waiting_for_broadcast_btn_details = State()
 
+
 # ==================== KLAVIATURALAR ====================
 
 def main_menu_keyboard():
@@ -149,6 +161,7 @@ def main_menu_keyboard():
         [KeyboardButton(text="ℹ️ Bot haqida")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
 
 async def check_subscription_keyboard():
     channels = await db.get_active_channels()
@@ -159,6 +172,7 @@ async def check_subscription_keyboard():
         
     inline_keyboard.append([InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_sub")])
     return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
+
 
 def admin_panel_keyboard(user_id: int):
     is_super = (user_id == SUPER_ADMIN_ID)
@@ -180,6 +194,7 @@ def admin_panel_keyboard(user_id: int):
     kb.append([InlineKeyboardButton(text="❌ Yopish", callback_data="admin_close")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
+
 # ==================== YORDAMCHI FUNKSIYALAR ====================
 
 async def is_admin(user_id: int) -> bool:
@@ -187,6 +202,7 @@ async def is_admin(user_id: int) -> bool:
         return True
     admins = await db.get_admin_list()
     return user_id in admins
+
 
 async def is_user_subscribed(user_id: int) -> bool:
     channels = await db.get_active_channels()
@@ -203,6 +219,7 @@ async def is_user_subscribed(user_id: int) -> bool:
             continue
     return True
 
+
 # ==================== ADMIN DASHBOARD ====================
 
 @dp.message(Command("admin"))
@@ -216,6 +233,7 @@ async def admin_dashboard(message: Message, state: FSMContext):
         parse_mode="HTML",
         reply_markup=admin_panel_keyboard(message.from_user.id)
     )
+
 
 @dp.callback_query(F.data == "admin_stats")
 async def show_stats(callback: CallbackQuery):
@@ -232,11 +250,13 @@ async def show_stats(callback: CallbackQuery):
         reply_markup=admin_panel_keyboard(callback.from_user.id)
     )
 
+
 @dp.callback_query(F.data == "admin_close")
 async def close_admin_panel(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
         return
     await callback.message.delete()
+
 
 @dp.message(Command("cancel"))
 async def cancel_handler(message: Message, state: FSMContext):
@@ -244,6 +264,7 @@ async def cancel_handler(message: Message, state: FSMContext):
         return
     await state.clear()
     await message.answer("❌ Amaliyot bekor qilindi.", reply_markup=main_menu_keyboard())
+
 
 # ==================== ADMINLARNI BOSHQARISH ====================
 
@@ -261,6 +282,7 @@ async def manage_admins_menu(callback: CallbackQuery):
     ])
     await callback.message.edit_text("👑 <b>Adminlarni Boshqarish Bo'limi</b>", parse_mode="HTML", reply_markup=kb)
 
+
 @dp.callback_query(F.data == "admin_back_main")
 async def back_to_main_admin(callback: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -272,12 +294,14 @@ async def back_to_main_admin(callback: CallbackQuery, state: FSMContext):
         reply_markup=admin_panel_keyboard(callback.from_user.id)
     )
 
+
 @dp.callback_query(F.data == "add_admin")
 async def start_add_admin(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != SUPER_ADMIN_ID:
         return
     await state.set_state(AdminStates.waiting_for_add_admin)
     await callback.message.edit_text("➕ Yangi adminning <b>Telegram ID</b>sini yuboring:\n\nBekor qilish: /cancel", parse_mode="HTML")
+
 
 @dp.message(AdminStates.waiting_for_add_admin)
 async def process_add_admin(message: Message, state: FSMContext):
@@ -292,12 +316,14 @@ async def process_add_admin(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ <code>{new_admin_id}</code> muvaffaqiyatli admin etib tayinlandi!", parse_mode="HTML")
 
+
 @dp.callback_query(F.data == "remove_admin")
 async def start_remove_admin(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != SUPER_ADMIN_ID:
         return
     await state.set_state(AdminStates.waiting_for_remove_admin)
     await callback.message.edit_text("➖ O'chiriladigan adminning <b>Telegram ID</b>sini yuboring:\n\nBekor qilish: /cancel", parse_mode="HTML")
+
 
 @dp.message(AdminStates.waiting_for_remove_admin)
 async def process_remove_admin(message: Message, state: FSMContext):
@@ -316,6 +342,7 @@ async def process_remove_admin(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ <code>{target_id}</code> adminlikdan olib tashlandi.", parse_mode="HTML")
 
+
 @dp.callback_query(F.data == "list_admins")
 async def list_admins_handler(callback: CallbackQuery):
     if callback.from_user.id != SUPER_ADMIN_ID:
@@ -323,6 +350,7 @@ async def list_admins_handler(callback: CallbackQuery):
     admins = await db.get_admin_list()
     admin_str = "\n".join([f"• <code>{a}</code>" for a in admins])
     await callback.message.edit_text(f"📋 <b>Mavjud Adminlar Ro'yxati:</b>\n\n👑 SuperAdmin: <code>{SUPER_ADMIN_ID}</code>\n{admin_str}", parse_mode="HTML")
+
 
 # ==================== MAJBURIY OBUNA KANALLARI ====================
 
@@ -339,6 +367,7 @@ async def manage_channels_menu(callback: CallbackQuery):
     ])
     await callback.message.edit_text("📢 <b>Majburiy Obuna Kanallarini Boshqarish</b>", parse_mode="HTML", reply_markup=kb)
 
+
 @dp.callback_query(F.data == "add_channel")
 async def start_add_channel(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
@@ -352,6 +381,7 @@ async def start_add_channel(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
 
+
 @dp.message(AdminStates.waiting_for_channel_add)
 async def process_add_channel(message: Message, state: FSMContext):
     if not await is_admin(message.from_user.id):
@@ -364,12 +394,14 @@ async def process_add_channel(message: Message, state: FSMContext):
     except Exception:
         await message.answer("⚠️ Noto'g'ri format kiritildi! Iltimos, namunaga qarab qayta yuboring.")
 
+
 @dp.callback_query(F.data == "remove_channel")
 async def start_remove_channel(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_channel_remove)
     await callback.message.edit_text("➖ O'chirmoqchi bo'lgan kanalingizning **Kanal ID**sini yuboring:", parse_mode="HTML")
+
 
 @dp.message(AdminStates.waiting_for_channel_remove)
 async def process_remove_channel(message: Message, state: FSMContext):
@@ -382,6 +414,7 @@ async def process_remove_channel(message: Message, state: FSMContext):
         await message.answer("✅ Kanal majburiy obuna ro'yxatidan olib tashlandi.")
     except Exception:
         await message.answer("⚠️ Noto'g'ri Kanal ID kiritildi.")
+
 
 @dp.callback_query(F.data == "list_channels")
 async def list_channels_handler(callback: CallbackQuery):
@@ -398,6 +431,7 @@ async def list_channels_handler(callback: CallbackQuery):
 
     await callback.message.edit_text(text, parse_mode="HTML")
 
+
 # ==================== BAN TIZIMI ====================
 
 @dp.callback_query(F.data == "admin_ban_menu")
@@ -412,12 +446,14 @@ async def ban_menu_handler(callback: CallbackQuery):
     ])
     await callback.message.edit_text("🚫 <b>Foydalanuvchilarni Bloklash Boshqaruvi</b>", parse_mode="HTML", reply_markup=kb)
 
+
 @dp.callback_query(F.data == "ban_user")
 async def start_ban_user(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_ban_id)
     await callback.message.edit_text("🚫 Bloklamoqchi bo'lgan foydalanuvchining **Telegram ID**sini yuboring:")
+
 
 @dp.message(AdminStates.waiting_for_ban_id)
 async def process_ban_user(message: Message, state: FSMContext):
@@ -436,12 +472,14 @@ async def process_ban_user(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"🚫 Foydalanuvchi <code>{uid}</code> botdan bloklandi.", parse_mode="HTML")
 
+
 @dp.callback_query(F.data == "unban_user")
 async def start_unban_user(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_unban_id)
     await callback.message.edit_text("✅ Blokdan chiqarmoqchi bo'lgan foydalanuvchining **Telegram ID**sini yuboring:")
+
 
 @dp.message(AdminStates.waiting_for_unban_id)
 async def process_unban_user(message: Message, state: FSMContext):
@@ -455,6 +493,7 @@ async def process_unban_user(message: Message, state: FSMContext):
     await db.set_user_ban_status(uid, is_banned=False)
     await state.clear()
     await message.answer(f"✅ Foydalanuvchi <code>{uid}</code> blokdan chiqarildi.", parse_mode="HTML")
+
 
 # ==================== BROADCAST (XABAR YUBORISH) ====================
 
@@ -471,6 +510,7 @@ async def start_broadcast(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
 
+
 @dp.message(AdminStates.waiting_for_broadcast_msg)
 async def process_broadcast_message(message: Message, state: FSMContext):
     if not await is_admin(message.from_user.id):
@@ -485,6 +525,7 @@ async def process_broadcast_message(message: Message, state: FSMContext):
     ])
 
     await message.answer("➕ Xabar ostiga URL tugma qo'shilsinmi?", parse_mode="HTML", reply_markup=kb)
+
 
 @dp.callback_query(AdminStates.waiting_for_broadcast_btn_ask, F.data == "bc_add_btn_no")
 async def broadcast_without_button(callback: CallbackQuery, state: FSMContext):
@@ -515,6 +556,7 @@ async def broadcast_without_button(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
 
+
 @dp.callback_query(AdminStates.waiting_for_broadcast_btn_ask, F.data == "bc_add_btn_yes")
 async def ask_button_details(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.waiting_for_broadcast_btn_details)
@@ -523,6 +565,7 @@ async def ask_button_details(callback: CallbackQuery, state: FSMContext):
         "<code>Tugma Nomi + https://t.me/link</code>",
         parse_mode="HTML"
     )
+
 
 @dp.message(AdminStates.waiting_for_broadcast_btn_details)
 async def process_button_and_send(message: Message, state: FSMContext):
@@ -571,6 +614,7 @@ async def process_button_and_send(message: Message, state: FSMContext):
         parse_mode="HTML"
     )
 
+
 # ==================== AUTOMATION (KANAL POSTLARINI TUSHIRISH) ====================
 
 @dp.channel_post(F.chat.id == CHANNEL_ID)
@@ -596,6 +640,7 @@ async def auto_save_channel_movie(message: Message):
         if saved:
             logging.info(f"✅ Kino saqlandi: Kod - #{movie_code}, Sifat - {quality}p, Msg ID - {message.message_id}")
 
+
 # ==================== FOYDALANUVCHI BO'LIMI ====================
 
 @dp.message(CommandStart())
@@ -619,21 +664,26 @@ async def start_handler(message: Message):
         return
 
     await message.answer(
-        f"Assalomu alaykum, <b>{escape(message.from_user.full_name)}</b>!\n\n"
+        f"Assalomu alaykum, <b>{message.from_user.full_name}</b>!\n\n"
         "Bizning rasmiy kino botimizga xush kelibsiz.\n"
         "Kino olish uchun shunchaki <b>kino kodini (masalan: 123)</b> yozib yuboring!",
         parse_mode="HTML",
         reply_markup=main_menu_keyboard()
     )
 
+
 @dp.callback_query(F.data == "check_sub")
 async def check_sub_callback(callback: CallbackQuery):
     if await is_user_subscribed(callback.from_user.id):
         await callback.answer("✅ Rahmat! Obuna tasdiqlandi.", show_alert=True)
-        await callback.message.delete()
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
         await callback.message.answer("Bosh menyu:\nKino kodini yozib yuborishingiz mumkin.", reply_markup=main_menu_keyboard())
     else:
         await callback.answer("❌ Siz hali barcha kanallarga a'zo bo'lmadingiz!", show_alert=True)
+
 
 @dp.message(F.text == "🎬 Kino izlash")
 async def ask_movie_code(message: Message):
@@ -655,6 +705,7 @@ async def ask_movie_code(message: Message):
         reply_markup=main_menu_keyboard()
     )
 
+
 @dp.message(F.text == "ℹ️ Bot haqida")
 async def about_handler(message: Message):
     if await db.is_user_banned(message.from_user.id):
@@ -673,6 +724,7 @@ async def about_handler(message: Message):
         "Ushbu bot orqali kanaldagi barcha kinolarni turli sifatlarda tezkor yuklab olishingiz mumkin.",
         parse_mode="HTML"
     )
+
 
 @dp.callback_query(F.data.startswith("get_quality:"))
 async def send_movie_by_quality(callback: CallbackQuery):
@@ -703,6 +755,7 @@ async def send_movie_by_quality(callback: CallbackQuery):
         logging.error(f"Kino yuborishda xatolik: {e}")
         await callback.answer("❌ Kinoni yuborishda xatolik yuz berdi.", show_alert=True)
 
+
 @dp.message(F.text)
 async def handle_all_messages(message: Message):
     if await db.is_user_banned(message.from_user.id):
@@ -730,7 +783,7 @@ async def handle_all_messages(message: Message):
                 kb = InlineKeyboardMarkup(inline_keyboard=[buttons])
                 raw_caption = movie.get("caption") or f"🎬 Kino kodi: {user_input}"
                 await message.answer(
-                    f"{escape(raw_caption)}\n\n👇 <b>Kerakli sifatni tanlang:</b>",
+                    f"{raw_caption}\n\n👇 <b>Kerakli sifatni tanlang:</b>",
                     parse_mode="HTML",
                     reply_markup=kb
                 )
@@ -749,9 +802,16 @@ async def handle_all_messages(message: Message):
             reply_markup=main_menu_keyboard()
         )
 
+
 async def main():
     print("Bot va Admin Dashboard API orqali muvaffaqiyatli ishga tushdi...")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        global session
+        if session and not session.closed:
+            await session.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
