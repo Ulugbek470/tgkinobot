@@ -11,9 +11,10 @@ logger = logging.getLogger(__name__)
 # Baza turini aniqlash (PostgreSQL yoki SQLite)
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+
 async def init_postgres():
     import asyncpg
-    
+
     # Render'dagi postgres:// ni postgresql:// ga o'tkazish
     db_url = DATABASE_URL
     if db_url.startswith("postgres://"):
@@ -21,7 +22,18 @@ async def init_postgres():
 
     conn = await asyncpg.connect(db_url)
     try:
-        # 1. Jadvalni yaratish
+        # 1. Foydalanuvchilar jadvali
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                full_name VARCHAR(255) NOT NULL,
+                username VARCHAR(255),
+                is_banned INT DEFAULT 0,
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        # 2. Kinolar jadvali
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS movies (
                 id SERIAL PRIMARY KEY,
@@ -34,13 +46,31 @@ async def init_postgres():
                 msg_480 BIGINT,
                 msg_720 BIGINT,
                 msg_1080 BIGINT,
+                caption TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        logger.info(" PostgreSQL: 'movies' jadvali tekshirildi/yaratildi.")
 
-        # 2. Ustunlar mavjudligini tekshirish va yo'q bo'lsa qo'shish (Migration logic)
-        required_columns = {
+        # 3. Adminlar jadvali
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id BIGINT PRIMARY KEY
+            );
+        """)
+
+        # 4. Kanallar jadvali
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS channels (
+                channel_id BIGINT PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                link VARCHAR(255) NOT NULL
+            );
+        """)
+
+        logger.info(" PostgreSQL: Barcha jadvallar tekshirildi/yaratildi.")
+
+        # Kinolar jadvaliga yetishmayotgan ustunlarni migratsiya qilish
+        required_movie_columns = {
             "title": "VARCHAR(255)",
             "genre": "VARCHAR(255)",
             "language": "VARCHAR(100)",
@@ -49,9 +79,9 @@ async def init_postgres():
             "msg_480": "BIGINT",
             "msg_720": "BIGINT",
             "msg_1080": "BIGINT",
+            "caption": "TEXT",
         }
 
-        # Mavjud ustunlarni olish
         existing_cols = await conn.fetch("""
             SELECT column_name 
             FROM information_schema.columns 
@@ -59,11 +89,14 @@ async def init_postgres():
         """)
         existing_col_names = [col['column_name'] for col in existing_cols]
 
-        for col_name, col_type in required_columns.items():
+        for col_name, col_type in required_movie_columns.items():
             if col_name not in existing_col_names:
                 await conn.execute(f"ALTER TABLE movies ADD COLUMN {col_name} {col_type};")
-                logger.info(f" PostgreSQL: Yangi ustun qo'shildi -> {col_name}")
+                logger.info(f" PostgreSQL: 'movies' ga yangi ustun qo'shildi -> {col_name}")
 
+    except Exception as e:
+        logger.error(f" PostgreSQL initialization xatosi: {e}")
+        raise e
     finally:
         await conn.close()
 
@@ -71,9 +104,22 @@ async def init_postgres():
 async def init_sqlite():
     import aiosqlite
     db_path = os.getenv("DB_PATH", "bot_database.db")
-    
+
     async with aiosqlite.connect(db_path) as db:
-        # 1. Jadvalni yaratish
+        await db.execute("PRAGMA journal_mode=WAL;")
+
+        # 1. Foydalanuvchilar jadvali
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                full_name TEXT NOT NULL,
+                username TEXT,
+                is_banned INTEGER DEFAULT 0,
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        # 2. Kinolar jadvali
         await db.execute("""
             CREATE TABLE IF NOT EXISTS movies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,18 +132,36 @@ async def init_sqlite():
                 msg_480 INTEGER,
                 msg_720 INTEGER,
                 msg_1080 INTEGER,
+                caption TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        await db.commit()
-        logger.info(" SQLite: 'movies' jadvali tekshirildi/yaratildi.")
 
-        # 2. Ustunlarni tekshirish va qo'shish
+        # 3. Adminlar jadvali
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id INTEGER PRIMARY KEY
+            );
+        """)
+
+        # 4. Kanallar jadvali
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS channels (
+                channel_id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                link TEXT NOT NULL
+            );
+        """)
+
+        await db.commit()
+        logger.info(" SQLite: Barcha jadvallar tekshirildi/yaratildi.")
+
+        # Kinolar jadvaliga migratsiya
         async with db.execute("PRAGMA table_info(movies);") as cursor:
             rows = await cursor.fetchall()
             existing_col_names = [row[1] for row in rows]
 
-        required_columns = {
+        required_movie_columns = {
             "title": "TEXT",
             "genre": "TEXT",
             "language": "TEXT",
@@ -106,24 +170,26 @@ async def init_sqlite():
             "msg_480": "INTEGER",
             "msg_720": "INTEGER",
             "msg_1080": "INTEGER",
+            "caption": "TEXT",
         }
 
-        for col_name, col_type in required_columns.items():
+        for col_name, col_type in required_movie_columns.items():
             if col_name not in existing_col_names:
                 await db.execute(f"ALTER TABLE movies ADD COLUMN {col_name} {col_type};")
                 await db.commit()
-                logger.info(f" SQLite: Yangi ustun qo'shildi -> {col_name}")
+                logger.info(f" SQLite: 'movies' ga yangi ustun qo'shildi -> {col_name}")
 
 
 async def create_db():
     if DATABASE_URL:
-        logger.info("PostgreSQL bazasiga ulaninsh va tekshirish boshlandi...")
+        logger.info("PostgreSQL bazasiga ulanish va tekshirish boshlandi...")
         await init_postgres()
     else:
         logger.info("SQLite bazasiga ulanish va tekshirish boshlandi...")
         await init_sqlite()
-    
+
     logger.info(" Baza va barcha ustunlar tayyor!")
+
 
 if __name__ == "__main__":
     asyncio.run(create_db())

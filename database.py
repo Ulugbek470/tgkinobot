@@ -1,22 +1,22 @@
 import logging
 import aiosqlite
-from typing import Optional, Dict, List, Tuple, Any
+from typing import Optional, Dict, List, Tuple, Any, Union
 
 DB_NAME = "bot_database.db"
 
-# Loglarni sozlash
+# Log sozlamalari
 logger = logging.getLogger(__name__)
 
 
 async def init_db() -> None:
-    """Ma'lumotlar bazasi, jadvallar, ustunlar va indekslarni yaratish."""
+    """Ma'lumotlar bazasi jadvallari, ustunlari va indekslarini yaratadi hamda optimizatsiya qiladi."""
     try:
         async with aiosqlite.connect(DB_NAME) as db:
             # WAL rejimini va tezlik optimizatsiyasini yoqish
             await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("PRAGMA synchronous=NORMAL;")
 
-            # Foydalanuvchilar jadvali
+            # 1. Foydalanuvchilar jadvali
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -27,7 +27,7 @@ async def init_db() -> None:
                 )
             """)
 
-            # Kinolar jadvali
+            # 2. Kinolar jadvali
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS movies (
                     code TEXT PRIMARY KEY,
@@ -39,14 +39,14 @@ async def init_db() -> None:
                 )
             """)
 
-            # Adminlar jadvali
+            # 3. Adminlar jadvali
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS admins (
                     user_id INTEGER PRIMARY KEY
                 )
             """)
 
-            # Majburiy obuna kanallari jadvali
+            # 4. Majburiy obuna kanallari jadvali
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS channels (
                     channel_id INTEGER PRIMARY KEY,
@@ -55,7 +55,7 @@ async def init_db() -> None:
                 )
             """)
 
-            # Migratsiyalar (Eski bazalarda ustunlar bo'lmasa avtomatik qo'shish)
+            # Migratsiyalar (Eski bazalarga moslashtirish)
             try:
                 await db.execute("ALTER TABLE movies ADD COLUMN msg_360 INTEGER DEFAULT NULL;")
             except Exception:
@@ -66,7 +66,7 @@ async def init_db() -> None:
             except Exception:
                 pass
 
-            # Indekslar
+            # Tezkor izlash uchun indekslar
             await db.execute("CREATE INDEX IF NOT EXISTS idx_movies_code ON movies(code);")
 
             await db.commit()
@@ -76,7 +76,7 @@ async def init_db() -> None:
         raise e
 
 
-# ==================== USER OPERATIONS ====================
+# ==================== FOYDALANUVCHILAR (USERS) ====================
 
 
 async def add_user(user_id: int, full_name: str, username: Optional[str] = None) -> bool:
@@ -90,7 +90,7 @@ async def add_user(user_id: int, full_name: str, username: Optional[str] = None)
     """
     try:
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute(query, (user_id, full_name, username))
+            await db.execute(query, (int(user_id), full_name, username))
             await db.commit()
             return True
     except Exception as e:
@@ -103,7 +103,7 @@ async def is_user_banned(user_id: int) -> bool:
     query = "SELECT is_banned FROM users WHERE user_id = ?"
     try:
         async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute(query, (user_id,)) as cursor:
+            async with db.execute(query, (int(user_id),)) as cursor:
                 row = await cursor.fetchone()
                 return bool(row[0]) if row and row[0] is not None else False
     except Exception as e:
@@ -111,21 +111,34 @@ async def is_user_banned(user_id: int) -> bool:
         return False
 
 
-async def set_user_ban_status(user_id: int, is_banned: bool) -> bool:
-    """Foydalanuvchini ban qilish yoki bandan chiqarish."""
-    query = "UPDATE users SET is_banned = ? WHERE user_id = ?"
+async def ban_user(user_id: int) -> bool:
+    """Foydalanuvchini bloklaydi."""
+    query = "UPDATE users SET is_banned = 1 WHERE user_id = ?"
     try:
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute(query, (1 if is_banned else 0, user_id))
+            await db.execute(query, (int(user_id),))
             await db.commit()
             return True
     except Exception as e:
-        logger.error(f"Ban holatini o'zgartirishda xatolik ({user_id}): {e}")
+        logger.error(f"Userni ban qilishda xatolik ({user_id}): {e}")
         return False
 
 
-async def get_all_active_user_ids() -> List[int]:
-    """Bloklanmagan barcha foydalanuvchilar ID larini olish (Broadcast uchun)."""
+async def unban_user(user_id: int) -> bool:
+    """Foydalanuvchini bandan chiqaradi."""
+    query = "UPDATE users SET is_banned = 0 WHERE user_id = ?"
+    try:
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(query, (int(user_id),))
+            await db.commit()
+            return True
+    except Exception as e:
+        logger.error(f"Userni bandan olishda xatolik ({user_id}): {e}")
+        return False
+
+
+async def get_all_users() -> List[int]:
+    """Barcha faol foydalanuvchilar ID larini oladi (Broadcast uchun)."""
     query = "SELECT user_id FROM users WHERE is_banned = 0 OR is_banned IS NULL"
     try:
         async with aiosqlite.connect(DB_NAME) as db:
@@ -133,42 +146,12 @@ async def get_all_active_user_ids() -> List[int]:
                 rows = await cursor.fetchall()
                 return [row[0] for row in rows]
     except Exception as e:
-        logger.error(f"Aktiv User ID larni olishda xatolik: {e}")
+        logger.error(f"Barcha user ID larni olishda xatolik: {e}")
         return []
-
-
-async def get_all_user_ids() -> List[int]:
-    """Barcha foydalanuvchilar ID larini olish."""
-    query = "SELECT user_id FROM users"
-    try:
-        async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute(query) as cursor:
-                rows = await cursor.fetchall()
-                return [row[0] for row in rows]
-    except Exception as e:
-        logger.error(f"User ID larni olishda xatolik: {e}")
-        return []
-
-
-async def get_stats() -> Tuple[int, int]:
-    """Oddiy statistika (Foydalanuvchilar va Kinolar soni)."""
-    query_users = "SELECT COUNT(*) FROM users"
-    query_movies = "SELECT COUNT(*) FROM movies"
-
-    try:
-        async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute(query_users) as c1:
-                users_count = (await c1.fetchone())[0]
-            async with db.execute(query_movies) as c2:
-                movies_count = (await c2.fetchone())[0]
-            return users_count, movies_count
-    except Exception as e:
-        logger.error(f"Statistika olishda xatolik: {e}")
-        return 0, 0
 
 
 async def get_extended_stats() -> Tuple[int, int, int]:
-    """Kengaytirilgan statistika (Foydalanuvchilar, Kinolar va Bloklanganlar soni)."""
+    """Statistika: (Foydalanuvchilar, Kinolar va Bloklanganlar soni)."""
     query_users = "SELECT COUNT(*) FROM users"
     query_movies = "SELECT COUNT(*) FROM movies"
     query_banned = "SELECT COUNT(*) FROM users WHERE is_banned = 1"
@@ -183,15 +166,15 @@ async def get_extended_stats() -> Tuple[int, int, int]:
                 banned_count = (await c3.fetchone())[0]
             return users_count, movies_count, banned_count
     except Exception as e:
-        logger.error(f"Kengaytirilgan statistika olishda xatolik: {e}")
+        logger.error(f"Statistika olishda xatolik: {e}")
         return 0, 0, 0
 
 
-# ==================== MOVIE OPERATIONS ====================
+# ==================== KINOLAR (MOVIES) ====================
 
 
-async def save_movie_quality(code: str, quality: str, message_id: int, caption: str = "") -> bool:
-    """Muayyan sifatdagi kinoni saqlaydi."""
+async def save_movie_quality(code: Union[str, int], quality: Union[str, int], message_id: int, caption: str = "") -> bool:
+    """Muayyan sifatdagi kinoni saqlaydi yoki yangilaydi."""
     allowed_qualities = {"360": "msg_360", "480": "msg_480", "720": "msg_720", "1080": "msg_1080"}
     quality_str = str(quality)
 
@@ -217,11 +200,11 @@ async def save_movie_quality(code: str, quality: str, message_id: int, caption: 
             await db.commit()
             return True
     except Exception as e:
-        logger.error(f"Sifat bo'yicha kino saqlashda xatolik (Kod: {code}, Sifat: {quality}): {e}")
+        logger.error(f"Kino saqlashda xatolik (Kod: {code}, Sifat: {quality}): {e}")
         return False
 
 
-async def get_movie(code: str) -> Optional[Dict[str, Any]]:
+async def get_movie(code: Union[str, int]) -> Optional[Dict[str, Any]]:
     """Kino kodi bo'yicha barcha sifatlar va caption'ni oladi."""
     query = "SELECT msg_360, msg_480, msg_720, msg_1080, caption FROM movies WHERE code = ?"
     try:
@@ -242,8 +225,8 @@ async def get_movie(code: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-async def delete_movie(code: str) -> bool:
-    """Kino kodiga ko'ra kinoni bazadan to'liq o'chirish."""
+async def delete_movie(code: Union[str, int]) -> bool:
+    """Kino kodi bo'yicha bazadan to'liq o'chirish."""
     query = "DELETE FROM movies WHERE code = ?"
     try:
         async with aiosqlite.connect(DB_NAME) as db:
@@ -256,15 +239,15 @@ async def delete_movie(code: str) -> bool:
         return False
 
 
-# ==================== ADMIN OPERATIONS ====================
+# ==================== ADMINLAR (ADMINS) ====================
 
 
 async def add_admin_user(user_id: int) -> bool:
-    """Admin qo'shish."""
+    """Yangi admin qo'shish."""
     query = "INSERT OR IGNORE INTO admins (user_id) VALUES (?)"
     try:
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute(query, (user_id,))
+            await db.execute(query, (int(user_id),))
             await db.commit()
             return True
     except Exception as e:
@@ -273,11 +256,11 @@ async def add_admin_user(user_id: int) -> bool:
 
 
 async def remove_admin_user(user_id: int) -> bool:
-    """Adminni o'chirish."""
+    """Adminni olib tashlash."""
     query = "DELETE FROM admins WHERE user_id = ?"
     try:
         async with aiosqlite.connect(DB_NAME) as db:
-            cursor = await db.execute(query, (user_id,))
+            cursor = await db.execute(query, (int(user_id),))
             deleted = cursor.rowcount > 0
             await db.commit()
             return deleted
@@ -299,10 +282,10 @@ async def get_admin_list() -> List[int]:
         return []
 
 
-# ==================== CHANNEL OPERATIONS ====================
+# ==================== KANALLAR (CHANNELS) ====================
 
 
-async def add_channel(channel_id: int, title: str, link: str) -> bool:
+async def add_channel(channel_id: Union[int, str], title: str, link: str) -> bool:
     """Majburiy obuna kanalini qo'shish."""
     query = """
         INSERT INTO channels (channel_id, title, link)
@@ -312,8 +295,9 @@ async def add_channel(channel_id: int, title: str, link: str) -> bool:
             link = excluded.link
     """
     try:
+        ch_id = int(channel_id) if str(channel_id).replace("-", "").isdigit() else channel_id
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute(query, (channel_id, title, link))
+            await db.execute(query, (ch_id, title, link))
             await db.commit()
             return True
     except Exception as e:
@@ -321,12 +305,13 @@ async def add_channel(channel_id: int, title: str, link: str) -> bool:
         return False
 
 
-async def remove_channel(channel_id: int) -> bool:
+async def delete_channel(channel_id: Union[int, str]) -> bool:
     """Kanalni majburiy obunadan o'chirish."""
     query = "DELETE FROM channels WHERE channel_id = ?"
     try:
+        ch_id = int(channel_id) if str(channel_id).replace("-", "").isdigit() else channel_id
         async with aiosqlite.connect(DB_NAME) as db:
-            cursor = await db.execute(query, (channel_id,))
+            cursor = await db.execute(query, (ch_id,))
             deleted = cursor.rowcount > 0
             await db.commit()
             return deleted
