@@ -5,17 +5,26 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 # Baza turini aniqlash (PostgreSQL yoki SQLite)
 DATABASE_URL = os.getenv("DATABASE_URL")
+SUPER_ADMIN_ID = os.getenv("ADMIN_ID") or os.getenv("SUPER_ADMIN_ID")
 
+
+# ==================== POSTGRESQL INIZIALIZATSIYASI ====================
 
 async def init_postgres():
-    import asyncpg
+    try:
+        import asyncpg
+    except ImportError as e:
+        logger.error("❌ asyncpg kutubxonasi topilmadi. Iltimos 'pip install asyncpg' ni ishga tushuring.")
+        raise e
 
-    # Render'dagi postgres:// ni postgresql:// ga o'tkazish
     db_url = DATABASE_URL
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
@@ -33,7 +42,7 @@ async def init_postgres():
             );
         """)
 
-        # 2. Kinolar jadvali
+        # 2. Kinolar jadvali (Multi-quality qo'llab-quvvatlaydi)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS movies (
                 id SERIAL PRIMARY KEY,
@@ -54,11 +63,12 @@ async def init_postgres():
         # 3. Adminlar jadvali
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS admins (
-                user_id BIGINT PRIMARY KEY
+                user_id BIGINT PRIMARY KEY,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
 
-        # 4. Kanallar jadvali
+        # 4. Kanallar jadvali (Majburiy obuna uchun)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS channels (
                 channel_id BIGINT PRIMARY KEY,
@@ -67,7 +77,7 @@ async def init_postgres():
             );
         """)
 
-        logger.info(" PostgreSQL: Barcha jadvallar tekshirildi/yaratildi.")
+        logger.info("🟢 PostgreSQL: Barcha jadvallar muvaffaqiyatli yaratildi/tekshirildi.")
 
         # Kinolar jadvaliga yetishmayotgan ustunlarni migratsiya qilish
         required_movie_columns = {
@@ -79,7 +89,7 @@ async def init_postgres():
             "msg_480": "BIGINT",
             "msg_720": "BIGINT",
             "msg_1080": "BIGINT",
-            "caption": "TEXT",
+            "caption": "TEXT"
         }
 
         existing_cols = await conn.fetch("""
@@ -92,14 +102,26 @@ async def init_postgres():
         for col_name, col_type in required_movie_columns.items():
             if col_name not in existing_col_names:
                 await conn.execute(f"ALTER TABLE movies ADD COLUMN {col_name} {col_type};")
-                logger.info(f" PostgreSQL: 'movies' ga yangi ustun qo'shildi -> {col_name}")
+                logger.info(f"🔄 PostgreSQL: 'movies' jadvaliga ustun qo'shildi -> {col_name}")
+
+        # Super Adminni bazaga avtomatik qo'shish
+        if SUPER_ADMIN_ID:
+            admin_id = int(SUPER_ADMIN_ID)
+            await conn.execute("""
+                INSERT INTO admins (user_id) 
+                VALUES ($1) 
+                ON CONFLICT (user_id) DO NOTHING;
+            """, admin_id)
+            logger.info(f"👑 PostgreSQL: Super Admin ({admin_id}) bazaga kiritildi.")
 
     except Exception as e:
-        logger.error(f" PostgreSQL initialization xatosi: {e}")
+        logger.error(f"❌ PostgreSQL inicializatsiya xatosi: {e}")
         raise e
     finally:
         await conn.close()
 
+
+# ==================== SQLITE INIZIALIZATSIYASI ====================
 
 async def init_sqlite():
     import aiosqlite
@@ -140,7 +162,8 @@ async def init_sqlite():
         # 3. Adminlar jadvali
         await db.execute("""
             CREATE TABLE IF NOT EXISTS admins (
-                user_id INTEGER PRIMARY KEY
+                user_id INTEGER PRIMARY KEY,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
 
@@ -154,7 +177,7 @@ async def init_sqlite():
         """)
 
         await db.commit()
-        logger.info(" SQLite: Barcha jadvallar tekshirildi/yaratildi.")
+        logger.info("🟢 SQLite: Barcha jadvallar muvaffaqiyatli yaratildi/tekshirildi.")
 
         # Kinolar jadvaliga migratsiya
         async with db.execute("PRAGMA table_info(movies);") as cursor:
@@ -170,25 +193,37 @@ async def init_sqlite():
             "msg_480": "INTEGER",
             "msg_720": "INTEGER",
             "msg_1080": "INTEGER",
-            "caption": "TEXT",
+            "caption": "TEXT"
         }
 
         for col_name, col_type in required_movie_columns.items():
             if col_name not in existing_col_names:
                 await db.execute(f"ALTER TABLE movies ADD COLUMN {col_name} {col_type};")
                 await db.commit()
-                logger.info(f" SQLite: 'movies' ga yangi ustun qo'shildi -> {col_name}")
+                logger.info(f"🔄 SQLite: 'movies' jadvaliga ustun qo'shildi -> {col_name}")
 
+        # Super Adminni bazaga avtomatik qo'shish
+        if SUPER_ADMIN_ID:
+            admin_id = int(SUPER_ADMIN_ID)
+            await db.execute("""
+                INSERT OR IGNORE INTO admins (user_id) 
+                VALUES (?);
+            """, (admin_id,))
+            await db.commit()
+            logger.info(f"👑 SQLite: Super Admin ({admin_id}) bazaga kiritildi.")
+
+
+# ==================== MAIN RUNNER ====================
 
 async def create_db():
     if DATABASE_URL:
-        logger.info("PostgreSQL bazasiga ulanish va tekshirish boshlandi...")
+        logger.info("📡 PostgreSQL bazasiga ulanish va strukturani yaratish boshlandi...")
         await init_postgres()
     else:
-        logger.info("SQLite bazasiga ulanish va tekshirish boshlandi...")
+        logger.info("📁 SQLite bazasiga ulanish va strukturani yaratish boshlandi...")
         await init_sqlite()
 
-    logger.info(" Baza va barcha ustunlar tayyor!")
+    logger.info("✅ Baza arxitekturasi va adminlar muvaffaqiyatli tayyorlandi!")
 
 
 if __name__ == "__main__":
