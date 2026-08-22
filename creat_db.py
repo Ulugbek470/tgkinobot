@@ -11,7 +11,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Baza turini aniqlash (PostgreSQL yoki SQLite)
 DATABASE_URL = os.getenv("DATABASE_URL")
 SUPER_ADMIN_ID = os.getenv("ADMIN_ID") or os.getenv("SUPER_ADMIN_ID")
 
@@ -19,11 +18,7 @@ SUPER_ADMIN_ID = os.getenv("ADMIN_ID") or os.getenv("SUPER_ADMIN_ID")
 # ==================== POSTGRESQL INIZIALIZATSIYASI ====================
 
 async def init_postgres():
-    try:
-        import asyncpg
-    except ImportError as e:
-        logger.error("❌ asyncpg kutubxonasi topilmadi. Iltimos 'pip install asyncpg' ni ishga tushuring.")
-        raise e
+    import asyncpg
 
     db_url = DATABASE_URL
     if db_url.startswith("postgres://"):
@@ -42,7 +37,7 @@ async def init_postgres():
             );
         """)
 
-        # 2. Kinolar jadvali (Multi-quality qo'llab-quvvatlaydi)
+        # 2. Kinolar jadvali
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS movies (
                 id SERIAL PRIMARY KEY,
@@ -68,18 +63,20 @@ async def init_postgres():
             );
         """)
 
-        # 4. Kanallar jadvali (Majburiy obuna uchun)
+        # 4. Kanallar jadvali (Yangilangan)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS channels (
                 channel_id BIGINT PRIMARY KEY,
-                title VARCHAR(255) NOT NULL,
-                link VARCHAR(255) NOT NULL
+                title VARCHAR(255),
+                link VARCHAR(255),
+                invite_link VARCHAR(255),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
 
         logger.info("🟢 PostgreSQL: Barcha jadvallar muvaffaqiyatli yaratildi/tekshirildi.")
 
-        # Kinolar jadvaliga yetishmayotgan ustunlarni migratsiya qilish
+        # --- MOVIES MIGRATSIYA ---
         required_movie_columns = {
             "title": "VARCHAR(255)",
             "genre": "VARCHAR(255)",
@@ -92,19 +89,34 @@ async def init_postgres():
             "caption": "TEXT"
         }
 
-        existing_cols = await conn.fetch("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='movies';
+        existing_movie_cols = await conn.fetch("""
+            SELECT column_name FROM information_schema.columns WHERE table_name='movies';
         """)
-        existing_col_names = [col['column_name'] for col in existing_cols]
+        existing_movie_col_names = [col['column_name'] for col in existing_movie_cols]
 
         for col_name, col_type in required_movie_columns.items():
-            if col_name not in existing_col_names:
+            if col_name not in existing_movie_col_names:
                 await conn.execute(f"ALTER TABLE movies ADD COLUMN {col_name} {col_type};")
-                logger.info(f"🔄 PostgreSQL: 'movies' jadvaliga ustun qo'shildi -> {col_name}")
+                logger.info(f"🔄 PostgreSQL: 'movies' ga ustun qo'shildi -> {col_name}")
 
-        # Super Adminni bazaga avtomatik qo'shish
+        # --- CHANNELS MIGRATSIYA ---
+        required_channel_columns = {
+            "title": "VARCHAR(255)",
+            "link": "VARCHAR(255)",
+            "invite_link": "VARCHAR(255)"
+        }
+
+        existing_channel_cols = await conn.fetch("""
+            SELECT column_name FROM information_schema.columns WHERE table_name='channels';
+        """)
+        existing_channel_col_names = [col['column_name'] for col in existing_channel_cols]
+
+        for col_name, col_type in required_channel_columns.items():
+            if col_name not in existing_channel_col_names:
+                await conn.execute(f"ALTER TABLE channels ADD COLUMN {col_name} {col_type};")
+                logger.info(f"🔄 PostgreSQL: 'channels' ga ustun qo'shildi -> {col_name}")
+
+        # Super Adminni kiritish
         if SUPER_ADMIN_ID:
             admin_id = int(SUPER_ADMIN_ID)
             await conn.execute("""
@@ -112,10 +124,9 @@ async def init_postgres():
                 VALUES ($1) 
                 ON CONFLICT (user_id) DO NOTHING;
             """, admin_id)
-            logger.info(f"👑 PostgreSQL: Super Admin ({admin_id}) bazaga kiritildi.")
 
     except Exception as e:
-        logger.error(f"❌ PostgreSQL inicializatsiya xatosi: {e}")
+        logger.error(f"❌ PostgreSQL xatosi: {e}")
         raise e
     finally:
         await conn.close()
@@ -130,7 +141,6 @@ async def init_sqlite():
     async with aiosqlite.connect(db_path) as db:
         await db.execute("PRAGMA journal_mode=WAL;")
 
-        # 1. Foydalanuvchilar jadvali
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -141,7 +151,6 @@ async def init_sqlite():
             );
         """)
 
-        # 2. Kinolar jadvali
         await db.execute("""
             CREATE TABLE IF NOT EXISTS movies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,7 +168,6 @@ async def init_sqlite():
             );
         """)
 
-        # 3. Adminlar jadvali
         await db.execute("""
             CREATE TABLE IF NOT EXISTS admins (
                 user_id INTEGER PRIMARY KEY,
@@ -167,22 +175,22 @@ async def init_sqlite():
             );
         """)
 
-        # 4. Kanallar jadvali
         await db.execute("""
             CREATE TABLE IF NOT EXISTS channels (
                 channel_id INTEGER PRIMARY KEY,
-                title TEXT NOT NULL,
-                link TEXT NOT NULL
+                title TEXT,
+                link TEXT,
+                invite_link TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
 
         await db.commit()
-        logger.info("🟢 SQLite: Barcha jadvallar muvaffaqiyatli yaratildi/tekshirildi.")
 
-        # Kinolar jadvaliga migratsiya
+        # --- MOVIES MIGRATSIYA ---
         async with db.execute("PRAGMA table_info(movies);") as cursor:
             rows = await cursor.fetchall()
-            existing_col_names = [row[1] for row in rows]
+            existing_movie_cols = [row[1] for row in rows]
 
         required_movie_columns = {
             "title": "TEXT",
@@ -197,33 +205,44 @@ async def init_sqlite():
         }
 
         for col_name, col_type in required_movie_columns.items():
-            if col_name not in existing_col_names:
+            if col_name not in existing_movie_cols:
                 await db.execute(f"ALTER TABLE movies ADD COLUMN {col_name} {col_type};")
                 await db.commit()
-                logger.info(f"🔄 SQLite: 'movies' jadvaliga ustun qo'shildi -> {col_name}")
 
-        # Super Adminni bazaga avtomatik qo'shish
+        # --- CHANNELS MIGRATSIYA ---
+        async with db.execute("PRAGMA table_info(channels);") as cursor:
+            rows = await cursor.fetchall()
+            existing_channel_cols = [row[1] for row in rows]
+
+        required_channel_columns = {
+            "title": "TEXT",
+            "link": "TEXT",
+            "invite_link": "TEXT"
+        }
+
+        for col_name, col_type in required_channel_columns.items():
+            if col_name not in existing_channel_cols:
+                await db.execute(f"ALTER TABLE channels ADD COLUMN {col_name} {col_type};")
+                await db.commit()
+                logger.info(f"🔄 SQLite: 'channels' ga ustun qo'shildi -> {col_name}")
+
         if SUPER_ADMIN_ID:
             admin_id = int(SUPER_ADMIN_ID)
-            await db.execute("""
-                INSERT OR IGNORE INTO admins (user_id) 
-                VALUES (?);
-            """, (admin_id,))
+            await db.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?);", (admin_id,))
             await db.commit()
-            logger.info(f"👑 SQLite: Super Admin ({admin_id}) bazaga kiritildi.")
 
 
 # ==================== MAIN RUNNER ====================
 
 async def create_db():
     if DATABASE_URL:
-        logger.info("📡 PostgreSQL bazasiga ulanish va strukturani yaratish boshlandi...")
+        logger.info("📡 PostgreSQL bazasi va jadvallari tekshirilmoqda...")
         await init_postgres()
     else:
-        logger.info("📁 SQLite bazasiga ulanish va strukturani yaratish boshlandi...")
+        logger.info("📁 SQLite bazasi va jadvallari tekshirilmoqda...")
         await init_sqlite()
 
-    logger.info("✅ Baza arxitekturasi va adminlar muvaffaqiyatli tayyorlandi!")
+    logger.info("✅ Baza va 'channels' jadvali muvaffaqiyatli yangilandi!")
 
 
 if __name__ == "__main__":
